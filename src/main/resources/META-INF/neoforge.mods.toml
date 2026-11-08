@@ -1,0 +1,33 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+
+license = "MIT"
+issueTrackerURL = "https://github.com/inv713/SmartItemSwitch/issues"
+
+[[mods]]
+modId = "smartinteract"
+version = "1.0.0"
+displayName = "智能物品切换"
+authors = "inv713"
+logoFile = "icon.png"
+displayURL = "https://github.com/inv713/SmartItemSwitch"
+description = '''
+给方块设置左键/右键要用的物品，交互时自动从背包换到手上。
+挖方块自动挑工具，攻击自动换武器；纯客户端，服务器不用装。
+
+Client-side block/item auto-switching for Minecraft 1.21.1. Press ` to configure in-game.
+'''
+
+[[dependencies.smartinteract]]
+    modId = "neoforge"
+    type = "required"
+    versionRange = "[21.1,21.2)"
+    ordering = "NONE"
+    side = "CLIENT"
+
+[[dependencies.smartinteract]]
+    modId = "minecraft"
+    type = "required"
+    versionRange = "[1.21.1]"
+    ordering = "NONE"
+    side = "CLIENT"
