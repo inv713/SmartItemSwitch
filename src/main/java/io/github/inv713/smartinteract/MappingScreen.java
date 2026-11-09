@@ -18,23 +18,20 @@ import net.minecraft.world.phys.HitResult;
 
 import java.util.List;
 
-/**
- * 游戏内配置界面，按 ` 打开。
- *
- * <p>打开时「方块」栏会自动填入准星对准的方块；「手持」按钮把当前手持物品填入「物品」栏；
- * 快捷类别按钮（剑/斧/镐/铲/锄）会扫描背包并填入该类工具。所有输入框都可以手动修改。</p>
- */
+/** 配置界面，按 ` 打开。 */
 public class MappingScreen extends Screen {
 
     private static final int WIDTH  = 290;
     private static final int HEIGHT = 330;
+    // 屏幕矮时压缩面板
+    private static final int MIN_PANEL_HEIGHT = 232;
+    private int panelHeight = HEIGHT;
 
     private final Screen lastScreen;
     private EditBox blockField;
     private EditBox itemField;
     private Button rightBtn;
     private Button leftBtn;
-    private Button addBtn;
     private Button autoToolBtn;
     private Button attackWeaponBtn;
 
@@ -51,7 +48,46 @@ public class MappingScreen extends Screen {
     private int rankMaxVisible;
 
     private boolean showHelp;
-    private Button helpBtn;
+    private int helpScrollOffset;
+
+    // 帮助页内容，超出部分滚轮翻
+    private static final String[] HELP_LINES = {
+        "对准: 将准星瞄准的方块填入方块栏",
+        "手持: 将手持物品填入物品栏",
+        "工具: 剑/斧/镐/铲/锄自动识别",
+        "  Shift+点类别按钮 = 手动记入/取消分类",
+        "",
+        "方块名以 # 开头 = 方块标签",
+        "  例: #minecraft:logs 匹配所有原木",
+        "",
+        "映射顺序 = fallback 顺序",
+        "  用户映射优先于默认自动切换",
+        "",
+        "工具排序: 上 = 高优先级",
+        "  左键挖方块时按此顺序选工具",
+        "攻击时: 排序(收藏)中的武器优先",
+        "  底部 [攻击切武器] 开关控制",
+        "",
+        "blockToolPriority (JSON 中配置):",
+        "  #minecraft:dirt → [shovel, hoe]",
+        "  改成 [hoe, shovel] 可优先锄地",
+        "  方块 id 比标签更优先",
+        "",
+        "默认优先级只写入一次，删掉不会自动恢复",
+        "",
+        "界面 [重置] 连点两次 = 恢复默认",
+        "  会清空映射、收藏、手动分类",
+        "",
+        "toolCategories (JSON 中配置):",
+        "  \"modid:emerald_pickaxe\": \"pickaxe\"",
+    };
+    private static final int HELP_LINE_HEIGHT = 14;
+
+    // 动作栏在界面里看不到，提示画在界面内
+    private String statusMessage;
+    private int statusTicks;
+    // 重置确认倒计时
+    private int resetConfirmTicks;
 
     private final SmartInteractConfig config = SmartInteractConfig.get();
 
@@ -60,63 +96,74 @@ public class MappingScreen extends Screen {
         this.lastScreen = lastScreen;
     }
 
-    // ---- 生命周期 ----
+    // 生命周期
 
     @Override
     protected void init() {
+        // 屏幕矮就少显示几行
+        panelHeight = Math.max(MIN_PANEL_HEIGHT, Math.min(HEIGHT, height - 8));
+        if (panelHeight > height) panelHeight = height;
         int guiLeft = Math.max(0, (width - WIDTH) / 2);
-        int guiTop  = Math.max(0, (height - HEIGHT) / 2);
+        int guiTop  = Math.max(0, (height - panelHeight) / 2);
 
-        // 方块输入框 + 对准按钮
-        blockField = new EditBox(font, guiLeft + 45, guiTop + 16, 145, 16, Component.literal("block"));
+        // 方块栏
+        blockField = new EditBox(font, guiLeft + 45, guiTop + 16, 187, 16, Component.literal("block"));
         blockField.setMaxLength(128);
         addRenderableWidget(blockField);
 
         addRenderableWidget(Button.builder(Component.literal("对准"), b -> fillBlockFromCrosshair())
-            .bounds(guiLeft + 195, guiTop + 15, 42, 18).build());
+            .bounds(guiLeft + 236, guiTop + 15, 42, 18).build());
 
-        // 物品输入框 + 手持按钮
-        itemField = new EditBox(font, guiLeft + 45, guiTop + 36, 145, 16, Component.literal("item"));
+        // 物品栏
+        itemField = new EditBox(font, guiLeft + 45, guiTop + 36, 187, 16, Component.literal("item"));
         itemField.setMaxLength(128);
         addRenderableWidget(itemField);
 
         addRenderableWidget(Button.builder(Component.literal("手持"), b -> fillItemFromHand())
-            .bounds(guiLeft + 195, guiTop + 35, 42, 18).build());
+            .bounds(guiLeft + 236, guiTop + 35, 42, 18).build());
 
-        // 快捷工具类别按钮
-        addRenderableWidget(Button.builder(Component.literal("剑"), b -> fillToolCategory("sword", "minecraft:wooden_sword"))
-            .bounds(guiLeft + 10, guiTop + 56, 42, 18).build());
-        addRenderableWidget(Button.builder(Component.literal("斧"), b -> fillToolCategory("axe", "minecraft:wooden_axe"))
-            .bounds(guiLeft + 54, guiTop + 56, 42, 18).build());
-        addRenderableWidget(Button.builder(Component.literal("镐"), b -> fillToolCategory("pickaxe", "minecraft:wooden_pickaxe"))
-            .bounds(guiLeft + 98, guiTop + 56, 42, 18).build());
-        addRenderableWidget(Button.builder(Component.literal("铲"), b -> fillToolCategory("shovel", "minecraft:wooden_shovel"))
-            .bounds(guiLeft + 142, guiTop + 56, 42, 18).build());
-        addRenderableWidget(Button.builder(Component.literal("锄"), b -> fillToolCategory("hoe", "minecraft:wooden_hoe"))
-            .bounds(guiLeft + 186, guiTop + 56, 42, 18).build());
+        // 工具类别
+        String[][] toolButtons = {
+            {"剑", "sword", "minecraft:wooden_sword"},
+            {"斧", "axe", "minecraft:wooden_axe"},
+            {"镐", "pickaxe", "minecraft:wooden_pickaxe"},
+            {"铲", "shovel", "minecraft:wooden_shovel"},
+            {"锄", "hoe", "minecraft:wooden_hoe"},
+        };
+        for (int i = 0; i < toolButtons.length; i++) {
+            final String category = toolButtons[i][1];
+            final String fallbackId = toolButtons[i][2];
+            addRenderableWidget(Button.builder(Component.literal(toolButtons[i][0]),
+                    b -> fillToolCategory(category, fallbackId))
+                .bounds(guiLeft + 10 + i * 55, guiTop + 56, 50, 18).build());
+        }
 
-        // 右键 / 左键切换 + 添加
+        // 左右键、添加、重置
         rightBtn = Button.builder(Component.literal("右键"), b -> toggleButton(true))
-            .bounds(guiLeft + 45, guiTop + 78, 55, 18).build();
+            .bounds(guiLeft + 30, guiTop + 78, 55, 18).build();
         leftBtn  = Button.builder(Component.literal("左键"),  b -> toggleButton(false))
-            .bounds(guiLeft + 103, guiTop + 78, 55, 18).build();
+            .bounds(guiLeft + 90, guiTop + 78, 55, 18).build();
         addRenderableWidget(rightBtn);
         addRenderableWidget(leftBtn);
         updateButtonColors();
 
-        addBtn = Button.builder(Component.literal("添加"), b -> addCurrentMapping())
-            .bounds(guiLeft + 165, guiTop + 78, 50, 18).build();
-        addRenderableWidget(addBtn);
+        addRenderableWidget(Button.builder(Component.literal("添加"), b -> addCurrentMapping())
+            .bounds(guiLeft + 150, guiTop + 78, 50, 18).build());
 
-        // 映射列表
+        addRenderableWidget(Button.builder(Component.literal("重置"), b -> confirmOrReset())
+            .bounds(guiLeft + 205, guiTop + 78, 55, 18).build());
+
+        // 映射列表行数
         listTop = guiTop + 114;
-        maxVisible = 4;
+        int extra = panelHeight - MIN_PANEL_HEIGHT;
+        maxVisible = 1 + Math.min(3, extra / ITEM_H);
 
         // 排序区
         int rankSepY  = listTop + maxVisible * ITEM_H + 4;   // ~182
         int rankFldY  = rankSepY + 14;                       // ~196
         rankListTop   = rankFldY + ITEM_H + 6;               // ~218
-        rankMaxVisible = Math.max(1, (guiTop + HEIGHT - 42 - rankListTop) / ITEM_H);
+        int remaining = extra - (maxVisible - 1) * ITEM_H;
+        rankMaxVisible = 1 + Math.min(3, remaining / ITEM_H);
 
         rankField = new EditBox(font, guiLeft + 50, rankFldY, 145, 16, Component.literal("tool rank"));
         rankField.setMaxLength(128);
@@ -128,32 +175,39 @@ public class MappingScreen extends Screen {
             .bounds(guiLeft + 242, rankFldY - 1, 20, 18).build());
 
         // 底部开关
-        SmartInteractConfig cfg = SmartInteractConfig.get();
-        autoToolBtn = Button.builder(toggleLabel("自动工具", cfg.isAutoToolSwitch()), b -> {
+        autoToolBtn = Button.builder(toggleLabel("自动工具", config.isAutoToolSwitch()), b -> {
                 config.toggleAutoToolSwitch(); rebuildToggles(); })
-            .bounds(guiLeft + 10, guiTop + HEIGHT - 34, 88, 18).build();
+            .bounds(guiLeft + 10, guiTop + panelHeight - 34, 88, 18).build();
         addRenderableWidget(autoToolBtn);
 
-        attackWeaponBtn = Button.builder(toggleLabel("攻击切武器", cfg.isAttackWeaponSwitch()), b -> {
+        attackWeaponBtn = Button.builder(toggleLabel("攻击切武器", config.isAttackWeaponSwitch()), b -> {
                 config.toggleAttackWeaponSwitch(); rebuildToggles(); })
-            .bounds(guiLeft + 102, guiTop + HEIGHT - 34, 88, 18).build();
+            .bounds(guiLeft + 102, guiTop + panelHeight - 34, 88, 18).build();
         addRenderableWidget(attackWeaponBtn);
 
-        helpBtn = Button.builder(Component.literal("帮助"), b -> { showHelp = !showHelp; })
-            .bounds(guiLeft + 194, guiTop + HEIGHT - 34, 40, 18).build();
-        addRenderableWidget(helpBtn);
+        addRenderableWidget(Button.builder(Component.literal("帮助"), b -> {
+            showHelp = !showHelp;
+            if (showHelp) helpScrollOffset = 0;
+        }).bounds(guiLeft + 194, guiTop + panelHeight - 34, 40, 18).build());
 
         addRenderableWidget(Button.builder(Component.literal("完成"), b -> onClose())
-            .bounds(guiLeft + WIDTH - 55, guiTop + HEIGHT - 34, 45, 18).build());
+            .bounds(guiLeft + WIDTH - 55, guiTop + panelHeight - 34, 45, 18).build());
 
-        // 首次打开时自动填入准星对准的方块
+        // 打开时自动填准星方块
         if (blockField.getValue().isEmpty()) {
             fillBlockFromCrosshair();
         }
         setInitialFocus(blockField);
     }
 
-    // ---- 准星 / 手持检测 ----
+    @Override
+    public void tick() {
+        super.tick();
+        if (statusTicks > 0) statusTicks--;
+        if (resetConfirmTicks > 0) resetConfirmTicks--;
+    }
+
+    // 准星/手持检测
 
     private void fillBlockFromCrosshair() {
         Minecraft mc = Minecraft.getInstance();
@@ -177,11 +231,7 @@ public class MappingScreen extends Screen {
         }
     }
 
-    /**
-     * 填入某类工具。
-     * <p>普通点击：优先用手持物品（若它属于该类），否则扫背包找同类，最后用默认 id。</p>
-     * <p>Shift + 点击：把当前手持物品手动记入该类（再次点击取消），用于模组工具识别失败时兜底。</p>
-     */
+    // 普通点击优先手持，Shift 点击手动记类别
     private void fillToolCategory(String category, String fallbackId) {
         Minecraft mc = Minecraft.getInstance();
         Player player = mc.player;
@@ -189,20 +239,22 @@ public class MappingScreen extends Screen {
 
         ItemStack held = player.getMainHandItem();
 
-        // 手动补充
+        // Shift 点类别
         if (hasShiftDown()) {
             String id = held.isEmpty()
                 ? itemField.getValue().trim()
                 : BuiltInRegistries.ITEM.getKey(held.getItem()).toString();
-            if (id.isEmpty()) return;
+            if (id.isEmpty()) {
+                setStatus("先手持一个物品，或在物品栏填入 id");
+                return;
+            }
             if (category.equals(config.getToolCategoryOverride(id))) {
                 config.removeToolCategoryOverride(id);
-                player.displayClientMessage(Component.literal("已取消手动分类: " + id), true);
+                setStatus("已取消手动分类: " + id);
             } else {
                 config.setToolCategoryOverride(id, category);
                 itemField.setValue(id);
-                player.displayClientMessage(
-                    Component.literal("已记入" + categoryLabel(category) + "类: " + id), true);
+                setStatus("已记入" + categoryLabel(category) + "类: " + id);
             }
             return;
         }
@@ -234,7 +286,7 @@ public class MappingScreen extends Screen {
         };
     }
 
-    /** 把当前手持物品填入排序输入框。 */
+    // 当前手持填进排序框
     private void fillRankFromHand() {
         Minecraft mc = Minecraft.getInstance();
         Player player = mc.player;
@@ -251,17 +303,15 @@ public class MappingScreen extends Screen {
         if (itemId.isEmpty()) return;
         ResourceLocation id = SmartInteractConfig.parseIdOrNull(itemId);
         if (id == null || !BuiltInRegistries.ITEM.containsKey(id)) {
-            Player player = Minecraft.getInstance().player;
-            if (player != null) {
-                player.displayClientMessage(Component.literal("无法收藏: 不存在的物品 " + itemId), true);
-            }
+            setStatus("无法收藏: 不存在的物品 " + itemId);
             return;
         }
         config.addToolRanking(itemId);
         rankField.setValue("");
+        setStatus("已收藏: " + itemId);
     }
 
-    // ---- 辅助方法 ----
+    // 辅助方法
 
     private void updateButtonColors() {
         rightBtn.active = !isRight;
@@ -277,6 +327,26 @@ public class MappingScreen extends Screen {
         return Component.literal(prefix + ": " + (on ? "ON" : "OFF"));
     }
 
+    private void setStatus(String message) {
+        statusMessage = message;
+        statusTicks = 120;
+    }
+
+    // 连点两次确认
+    private void confirmOrReset() {
+        if (resetConfirmTicks <= 0) {
+            resetConfirmTicks = 100;
+            setStatus("再点一次[重置]确认: 会清空映射/收藏/手动分类");
+            return;
+        }
+        resetConfirmTicks = 0;
+        config.resetToDefaults();
+        scrollOffset = 0;
+        rankScrollOffset = 0;
+        rebuildToggles();
+        setStatus("已恢复默认配置");
+    }
+
     private void rebuildToggles() {
         SmartInteractConfig cfg = SmartInteractConfig.get();
         autoToolBtn.setMessage(toggleLabel("自动工具", cfg.isAutoToolSwitch()));
@@ -288,22 +358,20 @@ public class MappingScreen extends Screen {
         String item  = itemField.getValue().trim();
         if (block.isEmpty() || item.isEmpty()) return;
 
-        // 校验，避免写入非法 id 导致解析时崩溃
+        // 校验 id
         String error = validateMapping(block, item);
         if (error != null) {
-            Player player = Minecraft.getInstance().player;
-            if (player != null) {
-                player.displayClientMessage(Component.literal("无法添加: " + error), true);
-            }
+            setStatus("无法添加: " + error);
             return;
         }
 
         config.addMapping(block, item, isRight ? "RIGHT" : "LEFT");
         blockField.setValue("");
         itemField.setValue("");
+        setStatus("已添加映射: " + block + " → " + item);
     }
 
-    /** 返回 null 表示合法，否则返回错误说明。 */
+    // 合法返回 null，否则返回错误
     private static String validateMapping(String block, String item) {
         ResourceLocation itemId = SmartInteractConfig.parseIdOrNull(item);
         if (itemId == null) return "物品 id 格式非法: " + item;
@@ -322,50 +390,52 @@ public class MappingScreen extends Screen {
         return null;
     }
 
-    // ---- 渲染 ----
+    // 渲染
 
     @Override
     public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
         renderBackground(g, mouseX, mouseY, partialTick);
 
         int guiLeft = Math.max(0, (width - WIDTH) / 2);
-        int guiTop  = Math.max(0, (height - HEIGHT) / 2);
+        int guiTop  = Math.max(0, (height - panelHeight) / 2);
 
-        // 帮助页会整块接管面板：先画它并直接返回，否则下面的控件会盖在帮助文字上
+        // 帮助页
         if (showHelp) {
-            g.fill(guiLeft, guiTop, guiLeft + WIDTH, guiTop + HEIGHT, 0xFF0E0E0E);
+            int panelBottom = Math.min(guiTop + panelHeight, height - 4);
+            g.fill(guiLeft, guiTop, guiLeft + WIDTH, panelBottom, 0xFF0E0E0E);
             g.drawString(font, "智能物品切换 使用说明", guiLeft + 12, guiTop + 12, 0xFFFF55);
-            String[] lines = {
-                "对准: 将准星瞄准的方块填入方块栏",
-                "手持: 将手持物品填入物品栏",
-                "工具: 剑/斧/镐/铲/锄自动识别",
-                "  Shift+点类别按钮 = 手动记入/取消分类",
-                "",
-                "方块名以 # 开头 = 方块标签",
-                "  例: #minecraft:logs 匹配所有原木",
-                "",
-                "映射顺序 = fallback 顺序",
-                "",
-                "工具排序: 上 = 高优先级",
-                "  左键挖方块时按此顺序选工具",
-                "攻击时: 排序(收藏)中的武器优先",
-                "  底部 [攻击切武器] 开关控制",
-                "",
-                "blockToolPriority (JSON 中配置):",
-                "  #minecraft:logs → [axe, pickaxe]",
-                "",
-                "toolCategories (JSON 中配置):",
-                "  \"modid:emerald_pickaxe\": \"pickaxe\"",
-                "按 [帮助] 或任意位置关闭此说明",
-            };
-            for (int i = 0; i < lines.length; i++) {
-                g.drawString(font, lines[i], guiLeft + 12, guiTop + 32 + i * 14, 0xCCCCCC);
+
+            int textTop = helpTop(guiTop);
+            int textBottom = helpTextBottom(guiTop);
+            int visible = Math.max(1, (textBottom - textTop) / HELP_LINE_HEIGHT);
+            int maxOffset = Math.max(0, HELP_LINES.length - visible);
+            helpScrollOffset = Math.max(0, Math.min(helpScrollOffset, maxOffset));
+
+            g.enableScissor(guiLeft + 8, textTop - 2, guiLeft + WIDTH - 18, textBottom);
+            for (int i = 0; i < visible && helpScrollOffset + i < HELP_LINES.length; i++) {
+                g.drawString(font, HELP_LINES[helpScrollOffset + i], guiLeft + 12,
+                    textTop + i * HELP_LINE_HEIGHT, 0xCCCCCC);
             }
+            g.disableScissor();
+
+            // 右侧滚动条
+            if (maxOffset > 0) {
+                int barX = guiLeft + WIDTH - 14;
+                int barHeight = textBottom - textTop;
+                g.fill(barX, textTop, barX + 4, textBottom, 0x40FFFFFF);
+                int thumbHeight = Math.max(10, barHeight * visible / HELP_LINES.length);
+                int thumbY = textTop + (barHeight - thumbHeight) * helpScrollOffset / maxOffset;
+                g.fill(barX, thumbY, barX + 4, thumbY + thumbHeight, 0xFFAAAAAA);
+            }
+
+            String hint = maxOffset > 0 ? "滚轮翻页 · 点击任意位置关闭" : "点击任意位置关闭";
+            int hintY = Math.min(guiTop + panelHeight - 18, panelBottom - 12);
+            g.drawString(font, hint, guiLeft + 12, hintY, 0x808080);
             return;
         }
 
         // 面板背景
-        g.fill(guiLeft, guiTop, guiLeft + WIDTH, guiTop + HEIGHT, 0xF0101010);
+        g.fill(guiLeft, guiTop, guiLeft + WIDTH, guiTop + panelHeight, 0xF0101010);
 
         super.render(g, mouseX, mouseY, partialTick);
 
@@ -381,6 +451,8 @@ public class MappingScreen extends Screen {
         // 映射列表
         List<SmartInteractConfig.Mapping> mappings = config.getMappings();
         int total = mappings.size();
+        // 修正滚动位置
+        scrollOffset = Math.max(0, Math.min(scrollOffset, Math.max(0, total - maxVisible)));
         int renderY = listTop;
 
         for (int i = 0; i < Math.min(total - scrollOffset, maxVisible); i++) {
@@ -406,19 +478,21 @@ public class MappingScreen extends Screen {
             g.drawString(font, scroll, guiLeft + WIDTH - 40, sepY + 2, 0x808080);
         }
 
-        // ---- 排序区 ----
+        // 排序区
         int rankSepY = listTop + maxVisible * ITEM_H + 4;
         g.hLine(guiLeft + 10, guiLeft + WIDTH - 10, rankSepY, 0x55FFFFFF);
         g.drawString(font, "工具排序 (上到下=高到低)", guiLeft + 12, rankSepY + 4, 0x808080);
 
         List<String> ranking = config.getToolRanking();
+        rankScrollOffset = Math.max(0, Math.min(rankScrollOffset,
+            Math.max(0, ranking.size() - rankMaxVisible)));
         int rankY = rankListTop;
         for (int i = 0; i < Math.min(ranking.size() - rankScrollOffset, rankMaxVisible); i++) {
             int idx = rankScrollOffset + i;
             String rid = ranking.get(idx);
             g.drawString(font, (idx + 1) + ". " + shorten(rid, 20), guiLeft + 12, rankY, 0xE0E0E0);
 
-            // 上移 / 下移 / 删除按钮
+            // 上移/下移/删除
             int bx = guiLeft + 205;
             boolean upHov = mouseX >= bx && mouseX < bx + 14 && mouseY >= rankY - 2 && mouseY < rankY + 12;
             boolean dnHov = mouseX >= bx + 16 && mouseX < bx + 30 && mouseY >= rankY - 2 && mouseY < rankY + 12;
@@ -433,13 +507,19 @@ public class MappingScreen extends Screen {
             String rsc = (rankScrollOffset + 1) + "-" + Math.min(rankScrollOffset + rankMaxVisible, ranking.size()) + " / " + ranking.size();
             g.drawString(font, rsc, guiLeft + WIDTH - 40, rankSepY + 4, 0x808080);
         }
+
+        // 状态提示
+        if (statusMessage != null && statusTicks > 0) {
+            g.drawString(font, shorten(statusMessage, 38), guiLeft + 10,
+                guiTop + panelHeight - 46, 0xFFFF55);
+        }
     }
 
-    // ---- 输入处理 ----
+    // 输入处理
 
     @Override
     public boolean mouseClicked(double mx, double my, int btn) {
-        // 帮助页打开时，点击任意位置都只关闭帮助，不再传给下面的控件
+        // 帮助页优先吃点击
         if (showHelp) { showHelp = false; return true; }
         if (btn == 0) {
             int guiLeft = Math.max(0, (width - WIDTH) / 2);
@@ -490,6 +570,16 @@ public class MappingScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mx, double my, double sx, double sy) {
+        // 帮助页优先吃滚轮
+        if (showHelp) {
+            int guiTop = Math.max(0, (height - panelHeight) / 2);
+            int visible = helpVisibleLines(guiTop);
+            int maxOffset = Math.max(0, HELP_LINES.length - visible);
+            int direction = sy > 0 ? 1 : (sy < 0 ? -1 : 0);
+            helpScrollOffset = (int) Math.clamp(helpScrollOffset - direction, 0, maxOffset);
+            return true;
+        }
+
         // 判断鼠标是否在排序区
         int rankSepY = listTop + maxVisible * ITEM_H + 4;
         List<String> ranking = config.getToolRanking();
@@ -515,6 +605,21 @@ public class MappingScreen extends Screen {
 
     @Override
     public boolean isPauseScreen() { return false; }
+
+    private int helpTop(int guiTop) {
+        return guiTop + 32;
+    }
+
+    // 帮助文字的可视底边
+    private int helpTextBottom(int guiTop) {
+        int panelBottom = Math.min(guiTop + panelHeight, height - 4);
+        return Math.max(helpTop(guiTop) + HELP_LINE_HEIGHT,
+            Math.min(guiTop + panelHeight - 26, panelBottom - 18));
+    }
+
+    private int helpVisibleLines(int guiTop) {
+        return Math.max(1, (helpTextBottom(guiTop) - helpTop(guiTop)) / HELP_LINE_HEIGHT);
+    }
 
     private static String shorten(String s, int max) {
         if (s.length() <= max) return s;

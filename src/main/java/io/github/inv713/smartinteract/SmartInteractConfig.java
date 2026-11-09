@@ -13,44 +13,56 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
-/**
- * 客户端 JSON 配置，路径为 config/smartinteract.json。
- *
- * <p>{@code toolPriority} 决定一个方块能同时被多种工具挖时优先用哪一类
- * （比如泥土用铲还是锄）。调整列表顺序即可改变优先级。</p>
- * <p>类别取值：pickaxe、shovel、axe、hoe、sword。</p>
- *
- * <pre>{@code
- * {
- *   "autoToolSwitch": true,
- *   "requireSneak": false,
- *   "toolPriority": ["pickaxe", "shovel", "axe", "hoe", "sword"],
- *   "mappings": [
- *     { "targetBlock": "modid:block_id", "item": "modid:item_id", "button": "RIGHT" }
- *   ]
- * }}</pre>
- */
+/** 客户端配置，路径 config/smartinteract.json。 */
 public class SmartInteractConfig {
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path CONFIG_PATH = Path.of("config", "smartinteract.json");
 
+    // 首次生成的默认方块优先级，之后以 JSON 为准
+    private static final Map<String, List<String>> DEFAULT_BLOCK_TOOL_PRIORITY = createDefaultBlockToolPriority();
+
+    private static Map<String, List<String>> createDefaultBlockToolPriority() {
+        Map<String, List<String>> map = new LinkedHashMap<>();
+        // 树叶：剪刀另算，这里给锄/剑兜底
+        map.put("#minecraft:leaves", List.of("hoe", "sword"));
+        // 泥土默认铲土径，想优先锄地就调换顺序
+        map.put("#minecraft:dirt", List.of("shovel", "hoe"));
+        map.put("#minecraft:logs", List.of("axe"));
+        map.put("#minecraft:mineable/pickaxe", List.of("pickaxe"));
+        map.put("#minecraft:mineable/axe", List.of("axe"));
+        map.put("#minecraft:mineable/shovel", List.of("shovel"));
+        map.put("#minecraft:mineable/hoe", List.of("hoe"));
+        return Collections.unmodifiableMap(map);
+    }
+
     boolean autoToolSwitch = true;
     boolean attackWeaponSwitch = true;
     boolean requireSneak   = false;
+    // 默认优先级只装一次，删了不再加回来
+    boolean defaultBlockPriorityInstalled;
+    // 方块没匹配到时的全局优先级
     List<String> toolPriority = new ArrayList<>(List.of("pickaxe", "shovel", "axe", "hoe", "sword"));
+    // 收藏工具，越靠前越优先
     final List<String> toolRanking  = new ArrayList<>();
+    // 手写映射
     final List<Mapping> rawMappings = new ArrayList<>();
+    // 方块/标签 → 工具类别优先级
     final Map<String, List<String>> blockToolPriority = new LinkedHashMap<>();
-    /** 手动工具分类：物品 id → 类别 (pickaxe/shovel/axe/hoe/sword)。优先于自动识别。 */
+    // 手动分类，优先于自动识别
     final Map<String, String> toolCategories = new LinkedHashMap<>();
 
+    // 右键索引
     private final Map<Block, List<Mapping>> rightClickMap = new HashMap<>();
+    // 左键索引
     private final Map<Block, List<Mapping>> leftClickMap  = new HashMap<>();
 
     public static class Mapping {
+        // 方块 id 或 #标签
         public String targetBlock;
+        // 物品 id
         public String item;
+        // RIGHT / LEFT
         public String button = "RIGHT";
 
         public Mapping() {}
@@ -70,13 +82,13 @@ public class SmartInteractConfig {
     public boolean isRequireSneak()   { return requireSneak; }
     public List<String> getToolRanking()  { return Collections.unmodifiableList(toolRanking); }
 
-    /** 返回该方块/标签配置的工具优先级，没有配置就用全局默认值。 */
+    // 查方块自己的优先级，没有就用全局
     public List<String> getToolPriorityFor(Block block) {
         ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(block);
-        // 直接按方块 id 匹配
+        // 普通方块 id
         List<String> prio = blockToolPriority.get(blockId.toString());
         if (prio != null) return prio;
-        // 按标签匹配（键以 # 开头）
+        // # 开头按标签
         for (var entry : blockToolPriority.entrySet()) {
             if (entry.getKey().startsWith("#")) {
                 ResourceLocation tagId = parseIdOrNull(entry.getKey().substring(1));
@@ -89,7 +101,7 @@ public class SmartInteractConfig {
         return toolPriority;
     }
 
-    /** 容错解析 id：非法字符串（例如误输入的空格、反引号）返回 null，绝不抛异常。 */
+    // 解析 id，写错返回 null
     public static ResourceLocation parseIdOrNull(String s) {
         if (s == null) return null;
         String v = s.trim();
@@ -103,13 +115,29 @@ public class SmartInteractConfig {
     public void toggleAutoToolSwitch()       { autoToolSwitch = !autoToolSwitch; save(); }
     public boolean isAttackWeaponSwitch()    { return attackWeaponSwitch; }
     public void toggleAttackWeaponSwitch()   { attackWeaponSwitch = !attackWeaponSwitch; save(); }
+
+    // 恢复默认配置
+    public void resetToDefaults() {
+        autoToolSwitch = true;
+        attackWeaponSwitch = true;
+        requireSneak = false;
+        toolPriority = new ArrayList<>(List.of("pickaxe", "shovel", "axe", "hoe", "sword"));
+        toolRanking.clear();
+        blockToolPriority.clear();
+        blockToolPriority.putAll(DEFAULT_BLOCK_TOOL_PRIORITY);
+        defaultBlockPriorityInstalled = true;
+        toolCategories.clear();
+        rawMappings.clear();
+        rebuildMaps();
+        save();
+    }
     public void addToolRanking(String itemId) { if (!toolRanking.contains(itemId)) { toolRanking.add(itemId); save(); } }
     public void removeToolRanking(int index) { if (index >= 0 && index < toolRanking.size()) { toolRanking.remove(index); save(); } }
 
     private static final Set<String> TOOL_CATEGORIES =
         Set.of("pickaxe", "shovel", "axe", "hoe", "sword");
 
-    /** 手动分类优先：返回 null 表示未手动指定或类别非法。 */
+    // 没手动分类或类别非法时返回 null
     public String getToolCategoryOverride(String itemId) {
         String category = toolCategories.get(itemId);
         if (category == null) return null;
@@ -138,32 +166,47 @@ public class SmartInteractConfig {
         if (index >= 0 && index < rawMappings.size()) { rawMappings.remove(index); rebuildMaps(); save(); }
     }
 
-    public int reload() {
+    private void reload() {
         rightClickMap.clear(); leftClickMap.clear(); rawMappings.clear();
         RawConfig raw;
+        boolean parsed = true;
         try {
             if (Files.exists(CONFIG_PATH)) raw = GSON.fromJson(Files.readString(CONFIG_PATH), RawConfig.class);
             else { raw = new RawConfig(); saveRaw(raw); }
-        } catch (Exception e) { raw = new RawConfig(); }
+        } catch (Exception e) {
+            // 文件坏了用默认值，不覆盖原文件
+            raw = new RawConfig();
+            parsed = false;
+        }
         if (raw == null) raw = new RawConfig();
         autoToolSwitch = raw.autoToolSwitch;
         attackWeaponSwitch = raw.attackWeaponSwitch;
         requireSneak   = raw.requireSneak;
-        if (raw.toolPriority != null && !raw.toolPriority.isEmpty()) {
-            toolPriority = new ArrayList<>(raw.toolPriority);
+        // 空列表就是不要兜底
+        if (raw.toolPriority != null) toolPriority = new ArrayList<>(raw.toolPriority);
+        toolRanking.clear();
+        if (raw.toolRanking != null) toolRanking.addAll(raw.toolRanking);
+        blockToolPriority.clear();
+        if (raw.blockToolPriority != null) blockToolPriority.putAll(raw.blockToolPriority);
+        defaultBlockPriorityInstalled = raw.defaultBlockPriorityInstalled;
+        boolean addedDefaults = false;
+        // 默认值只装一次
+        if (!defaultBlockPriorityInstalled) {
+            for (var entry : DEFAULT_BLOCK_TOOL_PRIORITY.entrySet()) {
+                if (!blockToolPriority.containsKey(entry.getKey())) {
+                    blockToolPriority.put(entry.getKey(), entry.getValue());
+                    addedDefaults = true;
+                }
+            }
+            defaultBlockPriorityInstalled = true;
+            addedDefaults = true;
         }
-        if (raw.toolRanking != null) {
-            toolRanking.clear(); toolRanking.addAll(raw.toolRanking);
-        }
-        if (raw.blockToolPriority != null) {
-            blockToolPriority.clear(); blockToolPriority.putAll(raw.blockToolPriority);
-        }
-        if (raw.toolCategories != null) {
-            toolCategories.clear(); toolCategories.putAll(raw.toolCategories);
-        }
+        toolCategories.clear();
+        if (raw.toolCategories != null) toolCategories.putAll(raw.toolCategories);
         if (raw.mappings != null) rawMappings.addAll(raw.mappings);
         rebuildMaps();
-        return rawMappings.size();
+        // 把默认值写进文件，方便直接改
+        if (addedDefaults && parsed) save();
     }
 
     void save() {
@@ -171,6 +214,7 @@ public class SmartInteractConfig {
         raw.autoToolSwitch = autoToolSwitch;
         raw.attackWeaponSwitch = attackWeaponSwitch;
         raw.requireSneak   = requireSneak;
+        raw.defaultBlockPriorityInstalled = defaultBlockPriorityInstalled;
         raw.toolPriority   = new ArrayList<>(toolPriority);
         raw.toolRanking    = new ArrayList<>(toolRanking);
         raw.blockToolPriority = new LinkedHashMap<>(blockToolPriority);
@@ -189,7 +233,7 @@ public class SmartInteractConfig {
         for (Mapping m : rawMappings) {
             if (m.targetBlock == null || m.item == null) continue;
 
-            // 标签匹配，例如 #minecraft:logs
+            // # 开头按标签
             if (m.targetBlock.startsWith("#")) {
                 String tagId = m.targetBlock.substring(1);
                 ResourceLocation tagLocation = parseIdOrNull(tagId);
@@ -207,7 +251,7 @@ public class SmartInteractConfig {
                 continue;
             }
 
-            // 直接按方块 id 匹配
+            // 普通方块 id
             ResourceLocation blockId = parseIdOrNull(m.targetBlock);
             if (blockId == null) continue;
             Block block = BuiltInRegistries.BLOCK.get(blockId);
@@ -223,6 +267,7 @@ public class SmartInteractConfig {
         boolean autoToolSwitch = true;
         boolean attackWeaponSwitch = true;
         boolean requireSneak   = false;
+        boolean defaultBlockPriorityInstalled = false;
         List<String> toolPriority = new ArrayList<>(List.of("pickaxe", "shovel", "axe", "hoe", "sword"));
         List<String> toolRanking  = new ArrayList<>();
         Map<String, List<String>> blockToolPriority = new LinkedHashMap<>();
